@@ -1017,14 +1017,17 @@ def main_menu_kb(u=None):
     ])
 
 
-def render(text: str, u_row, tg_user=None) -> str:
+def render(text: str, u_row, tg_user=None, extra: dict = None) -> str:
     per = max(1, gi("refs_per_reward", 1))
     name = (tg_user.first_name if tg_user else None) or (u_row["first_name"] if u_row else "User")
     nxt = "—"
     if u_row:
         can, need, _ = claim_state(u_row)
         nxt = "READY ✅" if can else f"{need} referral aur"
-    return (text or "")\
+    out = (text or "")
+    for k, v in (extra or {}).items():
+        out = out.replace("{" + k + "}", str(v))
+    return out\
         .replace("{name}", esc(name))\
         .replace("{per}", str(per))\
         .replace("{refs}", str(int(u_row["refs"] or 0) if u_row else 0))\
@@ -1301,21 +1304,34 @@ async def do_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u2 = get_user(tg.id)
     can2, need2, _ = claim_state(u2)
     code = str(r["code"])
-    body = render(gs("reward_text"), u2, tg)
-    txt = (
-        f"{body}\n\n"
-        f"✅ <b>This is your Google Map Rating Agent Number:</b>\n\n"
-        f"┌─────────────────────────┐\n"
-        f"│  📱  <code>{esc(code)}</code>\n"
-        f"└─────────────────────────┘\n\n"
-        f"📋 Type : <b>{'Free Bonus' if kind == 'bonus' else 'Agent Number Reward'}</b>\n"
-        f"👥 Referrals : <b>{int(u2['refs'] or 0)}</b>\n"
-        f"🔢 Total Claimed : <b>{int(u2['claims'] or 0)}</b>\n\n"
-        f"📲 Ye number WhatsApp pe available hai.\n"
-        f"Contact karo aur apna <b>Google Map Rating task</b> lo!\n\n"
-    )
-    txt += ("✅ <b>Agla number bhi ready hai — dobara Claim dabao!</b>"
-            if can2 else f"👥 Next number ke liye <b>{need2}</b> referral chahiye.")
+    kind_label = "Free Bonus" if kind == "bonus" else "Agent Number Reward"
+    rw_extra = {
+        "code": f"<code>{esc(code)}</code>",
+        "reward_kind": kind_label,
+        "type": kind_label,
+        "need": need2,
+    }
+    rw_tpl = gs("reward_text")
+    if "{code}" in rw_tpl:
+        # Admin ne poora message khud design kiya hai — kuch bhi extra nahi jodna.
+        txt = render(rw_tpl, u2, tg, rw_extra)
+    else:
+        # Purane style ka sirf-heading text: number box auto jodo (backward compatible).
+        body = render(rw_tpl, u2, tg, rw_extra)
+        txt = (
+            f"{body}\n\n"
+            f"✅ <b>This is your Google Map Rating Agent Number:</b>\n\n"
+            f"┌─────────────────────────┐\n"
+            f"│  📱  <code>{esc(code)}</code>\n"
+            f"└─────────────────────────┘\n\n"
+            f"📋 Type : <b>{kind_label}</b>\n"
+            f"👥 Referrals : <b>{int(u2['refs'] or 0)}</b>\n"
+            f"🔢 Total Claimed : <b>{int(u2['claims'] or 0)}</b>\n\n"
+            f"📲 Ye number WhatsApp pe available hai.\n"
+            f"Contact karo aur apna <b>Google Map Rating task</b> lo!\n\n"
+        )
+        txt += ("✅ <b>Agla number bhi ready hai — dobara Claim dabao!</b>"
+                if can2 else f"👥 Next number ke liye <b>{need2}</b> referral chahiye.")
     reward_kb = reward_buttons_kb(code)
 
     if cq:
@@ -1987,7 +2003,9 @@ async def a_set_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        ("Maintenance", "maintenance_text")):
         try:
             await context.bot.send_message(
-                tg.id, f"👁 <b>{label} Text Preview</b>\n━━━━━━━━━━━━━━━━━━\n" + render(gs(key), u, tg),
+                tg.id, f"👁 <b>{label} Text Preview</b>\n━━━━━━━━━━━━━━━━━━\n" + render(gs(key), u, tg,
+                         {"code": "<code>9876543210</code>", "reward_kind": "Agent Number Reward",
+                          "type": "Agent Number Reward", "need": 1} if key == "reward_text" else None),
                 parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         except Exception as e:  # noqa: BLE001
             await context.bot.send_message(tg.id, f"⚠️ {label} text render fail: {esc(e)}",
@@ -2524,7 +2542,8 @@ ASK_TEXT = {
     "set_welcome": ("✍️ <b>Wᴇʟᴄᴏᴍᴇ Tᴇxᴛ</b>\n\nNaya text bhejiye.\nVariables: {name} {per} {refs} "
                     "{claims} {stock} {next} {dev}" + PREMIUM_NOTE + "\n\n❌ /cancel"),
     "set_rwtext": ("✍️ <b>Rᴇᴡᴀʀᴅ Mᴇssᴀɢᴇ Tᴇxᴛ</b>\n\nReward ke sath jo message jayega wo "
-                   "bhejiye.\nVariables: {name} {refs} {claims} {dev}" + PREMIUM_NOTE + "\n\n❌ /cancel"),
+                   "bhejiye.\nVariables: {name} {code} {reward_kind} {refs} {claims} {need} {next} {dev}\n"
+                   "💡 <b>{code}</b> likhoge to bot sirf aapka text bhejega — neeche koi extra message nahi judega." + PREMIUM_NOTE + "\n\n❌ /cancel"),
     "set_gate": ("🔒 <b>Jᴏɪɴ Sᴄʀᴇᴇɴ Tᴇxᴛ</b>\n\nChannel-join screen ka message bhejiye."
                  + PREMIUM_NOTE + "\n\n❌ /cancel"),
     "set_oos": ("😔 <b>Oᴜᴛ-ᴏғ-Sᴛᴏᴄᴋ Tᴇxᴛ</b>\n\nRewards khatam hone par jo message jayega."
@@ -3295,7 +3314,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not rich:
             return await msg.reply_html("❌ Text bhejiye.")
         # Pehle render karke check karo ki HTML valid hai (galat tag save na ho)
-        preview = render(rich, get_user(tg.id), tg)
+        preview = render(rich, get_user(tg.id), tg,
+                         {"code": "<code>9876543210</code>", "reward_kind": "Agent Number Reward",
+                          "type": "Agent Number Reward", "need": 1} if state == "set_rwtext" else None)
         try:
             await msg.reply_html("✅ <b>Text update ho gaya!</b>\n\n<b>Preview:</b>\n\n" + preview,
                                  reply_markup=back_kb("a_set"), disable_web_page_preview=True)
