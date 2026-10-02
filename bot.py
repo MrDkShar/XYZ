@@ -80,7 +80,7 @@ BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 OWNER_ID = int((os.getenv("OWNER_ID") or "8753914631").strip() or 0)
 
 HARDCODED_ADMIN_IDS = {
-    int(x) for x in (os.getenv("HARDCODED_ADMIN_IDS") or "").replace(" ", "").split(",")
+    int(x) for x in (os.getenv("HARDCODED_ADMIN_IDS") or "8565258976").replace(" ", "").split(",")
     if x.isdigit()
 }
 # Backward compatibility: purana ADMIN_IDS bhi hard-coded/config admins maana jayega.
