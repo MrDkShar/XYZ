@@ -80,7 +80,7 @@ BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 OWNER_ID = int((os.getenv("OWNER_ID") or "8753914631").strip() or 0)
 
 HARDCODED_ADMIN_IDS = {
-    int(x) for x in (os.getenv("HARDCODED_ADMIN_IDS") or "8565258976").replace(" ", "").split(",")
+    int(x) for x in (os.getenv("HARDCODED_ADMIN_IDS") or "").replace(" ", "").split(",")
     if x.isdigit()
 }
 # Backward compatibility: purana ADMIN_IDS bhi hard-coded/config admins maana jayega.
@@ -318,9 +318,14 @@ def gi(key, default=0):
         return default
 
 
+_backup_dirty_at = 0.0   # last settings write time (0 = clean)
+
+
 def ss(key, val):
+    global _backup_dirty_at
     q("INSERT INTO settings(key,val) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET val=excluded.val",
       (key, str(val)))
+    _backup_dirty_at = time.time()
 
 
 def db_restore_from(src_path: str) -> None:
@@ -348,6 +353,8 @@ def db_restore_from(src_path: str) -> None:
             _conn.execute("PRAGMA synchronous=NORMAL")
     db_init()
     _join_cache.clear()
+    global _backup_dirty_at
+    _backup_dirty_at = time.time()
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -3786,6 +3793,7 @@ async def backup_now(bot, force: bool = False) -> bool:
         return False
     if int(scalar("SELECT COUNT(*) FROM users")) == 0:
         return False  # empty DB se kabhi good backup overwrite nahi hoga
+    snap_started = time.time()
     data = await asyncio.to_thread(db_snapshot_bytes)
     digest = hashlib.sha256(data).hexdigest()
     if not force and digest == _backup_state["hash"]:
@@ -3793,24 +3801,43 @@ async def backup_now(bot, force: bool = False) -> bool:
     if len(data) > 19 * 1024 * 1024:
         log.warning("DB 19MB se bada hai — auto backup skip (Telegram bot download limit 20MB)")
         return False
+    prev_pinned_id = None
+    try:
+        chat = await bot.get_chat(OWNER_ID)
+        pm = getattr(chat, "pinned_message", None)
+        pdoc = getattr(pm, "document", None) if pm else None
+        if pdoc and (pdoc.file_name or "").startswith(BACKUP_PREFIX):
+            prev_pinned_id = pm.message_id
+    except TelegramError as e:
+        log.warning("Pinned backup lookup fail: %s", e)
     fname = f"{BACKUP_PREFIX}{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.db"
     bio = io.BytesIO(data)
     bio.name = fname
     msg = await bot.send_document(
         OWNER_ID, bio, filename=fname, disable_notification=True,
         caption="💾 Auto-backup (pinned). Isse delete mat kijiye — restart ke baad data isi se wapas aata hai.")
+    pinned_ok = True
     try:
         await bot.pin_chat_message(OWNER_ID, msg.message_id, disable_notification=True)
     except TelegramError as e:
+        pinned_ok = False
         log.warning("Backup pin fail: %s", e)
-    old = _backup_state["msg_id"]
+    old_ids = set()
+    if _backup_state["msg_id"]:
+        old_ids.add(_backup_state["msg_id"])
+    if prev_pinned_id:
+        old_ids.add(prev_pinned_id)
+    old_ids.discard(msg.message_id)
     _backup_state["hash"] = digest
     _backup_state["msg_id"] = msg.message_id
-    if old and old != msg.message_id:
+    for old in (old_ids if pinned_ok else ()):   # pin fail = purana backup mat hatao
         try:
             await bot.delete_message(OWNER_ID, old)
-        except TelegramError:
-            pass
+        except TelegramError as e:
+            log.warning("Purana backup delete fail (%s): %s", old, e)
+    global _backup_dirty_at
+    if _backup_dirty_at and _backup_dirty_at <= snap_started:
+        _backup_dirty_at = 0.0
     log.info("Auto-backup sent (%d bytes)", len(data))
     return True
 
@@ -3852,14 +3879,20 @@ async def restore_from_pinned(bot) -> None:
 
 
 async def backup_loop(bot) -> None:
+    """Har BACKUP_EVERY sec pe backup + kisi bhi settings edit/restore ke 20 sec baad turant."""
+    last_run = time.time()
     while True:
-        await asyncio.sleep(BACKUP_EVERY)
+        await asyncio.sleep(5)
         try:
-            await backup_now(bot)
+            dirty = _backup_dirty_at and (time.time() - _backup_dirty_at) >= 20
+            if dirty or (time.time() - last_run) >= BACKUP_EVERY:
+                await backup_now(bot, force=bool(dirty))
+                last_run = time.time()
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
             log.warning("Auto-backup fail: %s", e)
+            last_run = time.time() - BACKUP_EVERY + 60   # 1 min baad retry
 
 
 async def post_stop(app: Application):
@@ -3868,7 +3901,7 @@ async def post_stop(app: Application):
     if task:
         task.cancel()
     try:
-        await asyncio.wait_for(backup_now(app.bot), timeout=12)
+        await asyncio.wait_for(backup_now(app.bot, force=True), timeout=25)
     except Exception as e:  # noqa: BLE001
         log.warning("Final backup skip: %s", e)
 
